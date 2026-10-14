@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/luikyv/go-oidc/pkg/goidc"
 	"github.com/luikyv/go-oidc/pkg/provider"
@@ -317,10 +318,7 @@ func newConfirmBroker() *confirmBroker {
 }
 
 func (b *confirmBroker) Ask(ctx context.Context, jid, txn, method, requestedURL string) (bool, error) {
-	thread, err := randomHex(16)
-	if err != nil {
-		return false, err
-	}
+	thread := uuid.NewV4().String()
 	pc := pendingConfirmation{bare: bareJID(jid), txn: txn, reply: make(chan confirmationResult, 1)}
 	b.mu.Lock()
 	if len(b.pend) >= maxPending {
@@ -731,12 +729,4 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
-}
-
-func randomHex(n int) (string, error) {
-	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
 }
