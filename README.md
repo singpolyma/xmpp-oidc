@@ -32,6 +32,7 @@ and an empty SQLite database at `DB` (default `xmpp-oidc.sqlite`) for client reg
 | `XMPP_SERVER`           | `localhost:5347`       | `host:port` of the XMPP server component interface |
 | `XMPP_DOMAIN`           | (**required**)         | Domain of the component |
 | `XMPP_COMPONENT_SECRET` | (**required**)         | Component secret |
+| `SALT`                  | (**required**)         | Random salt value |
 | `DB`                    | `xmpp-oidc.sqlite`     | DB for registered clients |
 | `TRUSTED_PROXIES`       | `127.0.0.0/8,::1/128`  | Comma-separated CIDRs whose `X-Forwarded-For` is trusted when picking the client IP for the `/register` rate limit. |
 

@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha3"
 	"crypto/x509"
 	"embed"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"hash"
 	"html"
 	"io/fs"
 	"log"
@@ -552,8 +555,9 @@ func xmpp70AuthnPolicy(broker *confirmBroker, scheme string) goidc.AuthnPolicy {
 				writeLoginPage(w, as.ID, redir, "Request was denied")
 				return goidc.StatusPending, nil
 			}
-			as.Subject = bare
-			as.Username = full
+			as.Subject = hex.EncodeToString(
+				hmac.New(func() hash.Hash { return sha3.New256() }, []byte(os.Getenv("SALT")+as.ClientID)).Sum([]byte(bare)),
+			)
 			log.Printf("authenticated: %s (client %s)", full, as.ClientID)
 			return goidc.StatusSuccess, nil
 		})
