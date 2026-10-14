@@ -1,0 +1,5 @@
+*.sqlite
+*.key
+*.swp
+go.sum
+xmpp-oidc
