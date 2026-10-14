@@ -529,7 +529,7 @@ func parseCredentials(r *http.Request) (jid, txn string, ok bool) {
 	return
 }
 
-func xmpp70AuthnPolicy(broker *confirmBroker, scheme string) goidc.AuthnPolicy {
+func xmpp70AuthnPolicy(broker *confirmBroker) goidc.AuthnPolicy {
 	return goidc.NewPolicy("xep-0070",
 		func(*http.Request, *goidc.AuthnSession, *goidc.Client) bool { return true },
 		func(w http.ResponseWriter, r *http.Request, as *goidc.AuthnSession, client *goidc.Client) (goidc.Status, error) {
@@ -611,10 +611,6 @@ func writeLoginPage(w http.ResponseWriter, sessionID, redirectURL, errMsg string
 func main() {
 	iss := envOr("ISSUER", "http://localhost:8080")
 	listen := envOr("LISTEN", ":8080")
-	scheme := "https"
-	if strings.HasPrefix(iss, "http://") {
-		scheme = "http"
-	}
 
 	keyPath := envOr("JWKS_KEY", "jwks.key")
 	key, err := loadSigningKey(keyPath)
@@ -688,7 +684,7 @@ func main() {
 			provider.AuthCodeGrantConfig{
 				ResponseTypes: []goidc.ResponseType{goidc.ResponseTypeCode},
 			},
-			provider.WithAuthPolicies(xmpp70AuthnPolicy(broker, scheme)),
+			provider.WithAuthPolicies(xmpp70AuthnPolicy(broker)),
 			provider.WithPKCE([]goidc.CodeChallengeMethod{goidc.CodeChallengeMethodSHA256},
 				provider.WithPKCERequired()),
 			provider.WithAuthCodeLifetime(60),
