@@ -521,6 +521,66 @@ func bareJID(full string) string {
 	return strings.ToLower(full)
 }
 
+const (
+	maxLocalpartOctets = 64 // RFC 5321 limit on the local-part
+	upperHex           = "0123456789ABCDEF"
+)
+
+// emailLocalpartByte marks bytes that may appear verbatim in an unquoted email
+// local-part (the RFC 5321 "atext" set), except:
+//   - '=', reserved as the escape introducer; and
+//   - '.', which RFC 5321 allows only between atext characters, so it is
+//     handled positionally by validDotString.
+var emailLocalpartByte = func() (t [256]bool) {
+	for _, c := range "!#$%&'*+-/?^_`{|}~" {
+		t[byte(c)] = true
+	}
+	for c := '0'; c <= '9'; c++ {
+		t[byte(c)] = true
+	}
+	for c := 'A'; c <= 'Z'; c++ {
+		t[byte(c)] = true
+	}
+	for c := 'a'; c <= 'z'; c++ {
+		t[byte(c)] = true
+	}
+	return
+}()
+
+func encodeEmailLocalpart(s string, keepDots bool) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if emailLocalpartByte[c] || (keepDots && c == '.') {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('=')
+		b.WriteByte(upperHex[c>>4])
+		b.WriteByte(upperHex[c&0x0f])
+	}
+	return b.String()
+}
+
+func validDotString(s string) bool {
+	return s != "" && s[0] != '.' && s[len(s)-1] != '.' && !strings.Contains(s, "..")
+}
+
+func emailForJID(bare, gateway string) (string, error) {
+	local := encodeEmailLocalpart(bare, true)
+	// '.' may pass through, but RFC 5321 forbids it at the edges and doubled,
+	// so fall back to escaping dots as well.
+	if !validDotString(local) {
+		local = encodeEmailLocalpart(bare, false)
+	}
+	if len(local) > maxLocalpartOctets {
+		return "", fmt.Errorf("encoded local-part is %d octets, over the %d limit",
+			len(local), maxLocalpartOctets)
+	}
+	return local + "@" + gateway, nil
+}
+
 func parseCredentials(r *http.Request) (jid, txn string, ok bool) {
 	if jid := strings.TrimSpace(r.PostFormValue("jid")); jid != "" {
 		txn = strings.TrimSpace(r.PostFormValue("txn"))
@@ -670,6 +730,11 @@ func main() {
 		log.Fatal(err)
 	}
 
+	emailGateway := os.Getenv("EMAIL_GATEWAY")
+	if emailGateway != "" {
+		log.Printf("email claims will be minted at %s", emailGateway)
+	}
+
 	jwks := goidc.JSONWebKeySet{Keys: []goidc.JSONWebKey{{
 		KeyID:     "oidc1",
 		Key:       key,
@@ -725,17 +790,27 @@ func main() {
 			IDTokenAlgs: []goidc.SignatureAlgorithm{goidc.SigAlgRS256},
 			// default in-memory store
 		},
-		provider.WithScopes(goidc.ScopeOpenID, goidc.ScopeProfile),
+		provider.WithScopes(goidc.ScopeOpenID, goidc.ScopeProfile, goidc.ScopeEmail),
 		provider.WithOpenIDScopeRequired(),
-		provider.WithClaims("preferred_username", "jid"),
+		provider.WithClaims("preferred_username", "jid", "email", "email_verified"),
 		provider.WithUserInfoClaims(func(_ context.Context, grant *goidc.Grant) map[string]any {
 			if !hasScope(grant.Scopes, "profile") {
 				return nil
 			}
-			return map[string]any{
+			jid, _ := grant.Store["jid"].(string)
+			claims := map[string]any{
 				"preferred_username": grant.Username,
 				"jid":                grant.Store["jid"],
 			}
+			if emailGateway != "" && hasScope(grant.Scopes, "email") {
+				if addr, err := emailForJID(jid, emailGateway); err == nil {
+					claims["email"] = addr
+					claims["email_verified"] = true
+				} else {
+					log.Printf("no email claim for %s: %v", jid, err)
+				}
+			}
+			return claims
 		}),
 		provider.WithAuthSessionLifetime(180),
 		provider.WithNoneAuthn(), // public clients only. PKCE required
