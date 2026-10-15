@@ -608,6 +608,30 @@ func writeLoginPage(w http.ResponseWriter, sessionID, redirectURL, errMsg string
 		html.EscapeString(code), html.EscapeString(redirectURL))
 }
 
+var corsEndpoints = map[string]string{
+	"/token":    "POST, OPTIONS",
+	"/userinfo": "GET, POST, OPTIONS",
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		allow, ok := corsEndpoints[r.URL.Path]
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", "*")
+		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		if r.Method == http.MethodOptions {
+			h.Set("Access-Control-Allow-Methods", allow)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	iss := envOr("ISSUER", "http://localhost:8080")
 	listen := envOr("LISTEN", ":8080")
@@ -713,7 +737,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:        listen,
-		Handler:     mux,
+		Handler:     withCORS(mux),
 		ReadTimeout: 5 * time.Second,
 	}
 	log.Printf("OIDC endpoints + static assets on %s", listen)
