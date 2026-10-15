@@ -529,33 +529,54 @@ func parseCredentials(r *http.Request) (jid, txn string, ok bool) {
 	return
 }
 
+func hasScope(scopes, want string) bool {
+	for _, s := range strings.Fields(scopes) {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 func xmpp70AuthnPolicy(broker *confirmBroker) goidc.AuthnPolicy {
 	return goidc.NewPolicy("xep-0070",
 		func(*http.Request, *goidc.AuthnSession, *goidc.Client) bool { return true },
 		func(w http.ResponseWriter, r *http.Request, as *goidc.AuthnSession, client *goidc.Client) (goidc.Status, error) {
 			redir := redirectForDisplay(as, client)
+			profileRequested := hasScope(as.Scopes, "profile")
 			jid, txn, have := parseCredentials(r)
 			if !have {
-				writeLoginPage(w, as.ID, redir, "")
+				writeLoginPage(w, as.ID, redir, "", profileRequested)
 				return goidc.StatusPending, nil
 			}
 			bare, full, err := normalizeJID(jid)
 			if err != nil {
-				writeLoginPage(w, as.ID, redir, "That Jabber ID isn't valid")
+				writeLoginPage(w, as.ID, redir, "That Jabber ID isn't valid", profileRequested)
 				return goidc.StatusPending, nil
 			}
 			app, err := broker.Ask(r.Context(), full, txn, "GET", redir)
 			switch {
 			case err != nil:
-				writeLoginPage(w, as.ID, redir, err.Error())
+				writeLoginPage(w, as.ID, redir, err.Error(), profileRequested)
 				return goidc.StatusPending, nil
 			case !app:
-				writeLoginPage(w, as.ID, redir, "Request was denied")
+				writeLoginPage(w, as.ID, redir, "Request was denied", profileRequested)
 				return goidc.StatusPending, nil
 			}
-			as.Subject = hex.EncodeToString(
-				hmac.New(func() hash.Hash { return sha3.New256() }, []byte(os.Getenv("SALT")+as.ClientID)).Sum([]byte(bare)),
-			)
+			sub := hmac.New(func() hash.Hash { return sha3.New256() }, []byte(os.Getenv("SALT")+as.ClientID))
+			sub.Write([]byte(bare))
+			as.Subject = hex.EncodeToString(sub.Sum(nil))
+			if as.Store == nil {
+				as.Store = map[string]any{}
+			}
+			if profileRequested && r.PostFormValue("share_profile") != "" {
+				as.GrantedScopes = as.Scopes
+				local, _, _ := strings.Cut(bare, "@")
+				as.Username = local
+				as.Store["jid"] = bare
+			} else {
+				as.GrantedScopes = "openid"
+			}
 			log.Printf("authenticated: %s (client %s)", full, as.ClientID)
 			return goidc.StatusSuccess, nil
 		})
@@ -582,15 +603,16 @@ const loginPage = `<!DOCTYPE html>
 <p>You'll be redirected to <code>%[4]s</code> after login.</p>
 <form method="post" action="/authorize/%[1]s">
  <label>Jabber ID
-  <input name="jid" placeholder="you@yourxmpp.example" required autofocus></label>
+  <input name="jid" placeholder="you@example.com" required autofocus></label>
  <label>Transaction code <input type="text" name="txn" value="%[3]s"><br />
 <small>Will be shown in your app, and must match.</small></label>
+ %[5]s
  %[2]s
  <button type="submit">Login</button>
 </form>
 </body></html>`
 
-func writeLoginPage(w http.ResponseWriter, sessionID, redirectURL, errMsg string) {
+func writeLoginPage(w http.ResponseWriter, sessionID, redirectURL, errMsg string, profileRequested bool) {
 	code, err := newTransactionCode()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -603,9 +625,15 @@ func writeLoginPage(w http.ResponseWriter, sessionID, redirectURL, errMsg string
 	if errMsg != "" {
 		notice = "<p class='notice'>" + html.EscapeString(errMsg) + "</p>"
 	}
+	consent := ""
+	if profileRequested {
+		consent = `<label>Share profile information
+				<input type="checkbox" name="share_profile" checked />
+			</label>`
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, loginPage, html.EscapeString(url.PathEscape(sessionID)), notice,
-		html.EscapeString(code), html.EscapeString(redirectURL))
+		html.EscapeString(code), html.EscapeString(redirectURL), consent)
 }
 
 var corsEndpoints = map[string]string{
@@ -699,6 +727,16 @@ func main() {
 		},
 		provider.WithScopes(goidc.ScopeOpenID, goidc.ScopeProfile),
 		provider.WithOpenIDScopeRequired(),
+		provider.WithClaims("preferred_username", "jid"),
+		provider.WithUserInfoClaims(func(_ context.Context, grant *goidc.Grant) map[string]any {
+			if !hasScope(grant.Scopes, "profile") {
+				return nil
+			}
+			return map[string]any{
+				"preferred_username": grant.Username,
+				"jid":                grant.Store["jid"],
+			}
+		}),
 		provider.WithAuthSessionLifetime(180),
 		provider.WithNoneAuthn(), // public clients only. PKCE required
 		provider.WithDCR(
