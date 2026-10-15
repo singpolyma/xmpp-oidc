@@ -35,6 +35,10 @@ import (
 
 const (
 	httpAuthNS  = "http://jabber.org/protocol/http-auth" // XEP-0070
+	vcard4NS    = "urn:ietf:params:xml:ns:vcard-4.0"     // RFC 6351
+	nickNode    = "http://jabber.org/protocol/nick"
+	vcard4Node  = "urn:xmpp:vcard4"
+	pepTimeout  = 5 * time.Second
 	confirmWait = 120 * time.Second
 	maxPending  = 128
 )
@@ -488,6 +492,139 @@ func parsePlainAnswer(body string) (approved bool, txn string, understood bool) 
 	return approved, fields[1], true
 }
 
+func fetchPEPItem(ctx context.Context, conn *xmpp.Component, bare, node string) (*stanza.Node, error) {
+	ctx, cancel := context.WithTimeout(ctx, pepTimeout)
+	defer cancel()
+
+	iq, err := stanza.NewItemsRequest(bare, node, 1)
+	if err != nil {
+		return nil, fmt.Errorf("build %s request: %w", node, err)
+	}
+	iq.Id = uuid.NewV4().String()
+
+	ch, err := conn.SendIQ(ctx, iq)
+	if err != nil {
+		return nil, fmt.Errorf("%s query: %w", node, err)
+	}
+
+	select {
+	case res := <-ch:
+		if res.Type == stanza.IQTypeError {
+			return nil, nil
+		}
+		ps, ok := res.Payload.(*stanza.PubSubGeneric)
+		if !ok {
+			return nil, fmt.Errorf("unexpected payload %T", res.Payload)
+		}
+		if ps.Items == nil || len(ps.Items.List) == 0 {
+			return nil, nil
+		}
+		return ps.Items.List[0].Any, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func fetchNicknamePEP(ctx context.Context, conn *xmpp.Component, bare string) (string, error) {
+	n, err := fetchPEPItem(ctx, conn, bare, nickNode)
+	if err != nil || n == nil || n.XMLName.Space != nickNode {
+		return "", err
+	}
+	return strings.TrimSpace(n.Content), nil
+}
+
+func fetchVCard4(ctx context.Context, conn *xmpp.Component, bare string) (map[string]any, error) {
+	n, err := fetchPEPItem(ctx, conn, bare, vcard4Node)
+	if err != nil || n == nil || n.XMLName.Local != "vcard" {
+		return nil, err
+	}
+	return vcard4Claims(n), nil
+}
+
+func vcard4Claims(v *stanza.Node) map[string]any {
+	claims := map[string]any{}
+
+	setStr(claims, "name", kid(nodeChild(v, "fn"), "text"))
+
+	if n := nodeChild(v, "n"); n != nil {
+		setStr(claims, "family_name", strings.Join(kids(n, "surname"), " "))
+		setStr(claims, "given_name", strings.Join(kids(n, "given"), " "))
+		setStr(claims, "middle_name", strings.Join(kids(n, "additional"), " "))
+	}
+
+	setStr(claims, "nickname", kid(nodeChild(v, "nickname"), "text"))
+	setStr(claims, "picture", kid(nodeChild(v, "photo"), "uri"))
+	setStr(claims, "website", kid(nodeChild(v, "url"), "uri"))
+	setStr(claims, "zoneinfo", kid(nodeChild(v, "tz"), "text"))
+	setStr(claims, "locale", kid(nodeChild(v, "lang"), "language-tag"))
+
+	if d := kid(nodeChild(v, "bday"), "date"); len(d) == 8 {
+		if t, err := time.Parse("20060102", d); err == nil {
+			claims["birthdate"] = t.Format("2006-01-02")
+		}
+	}
+
+	setStr(claims, "email", kid(nodeChild(v, "email"), "text"))
+
+	return claims
+}
+
+func parseVCardTimestamp(s string) (int64, bool) {
+	for _, layout := range []string{"20060102T150405Z0700", "20060102T150405", time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Unix(), true
+		}
+	}
+	return 0, false
+}
+
+func nodeChild(n *stanza.Node, local string) *stanza.Node {
+	if n == nil {
+		return nil
+	}
+	for i := range n.Nodes {
+		if n.Nodes[i].XMLName.Local == local {
+			return &n.Nodes[i]
+		}
+	}
+	return nil
+}
+
+func kid(n *stanza.Node, local string) string {
+	if n == nil {
+		return ""
+	}
+	for i := range n.Nodes {
+		if n.Nodes[i].XMLName.Local == local {
+			if s := strings.TrimSpace(n.Nodes[i].Content); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func kids(n *stanza.Node, local string) []string {
+	if n == nil {
+		return nil
+	}
+	var out []string
+	for i := range n.Nodes {
+		if n.Nodes[i].XMLName.Local == local {
+			if s := strings.TrimSpace(n.Nodes[i].Content); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func setStr(m map[string]any, key, val string) {
+	if val = strings.TrimSpace(val); val != "" {
+		m[key] = val
+	}
+}
+
 func normalizeJID(in string) (bare, full string, err error) {
 	in = strings.TrimSpace(in)
 	local, domain, ok := strings.Cut(in, "@")
@@ -631,6 +768,18 @@ func xmpp70AuthnPolicy(broker *confirmBroker) goidc.AuthnPolicy {
 			}
 			if profileRequested && r.PostFormValue("share_profile") != "" {
 				as.GrantedScopes = as.Scopes
+				if vc, err := fetchVCard4(r.Context(), broker.conn, bare); err != nil {
+					log.Printf("vcard4 lookup for %s: %v", bare, err)
+				} else {
+					for k, val := range vc {
+						as.Store[k] = val
+					}
+				}
+				if nick, err := fetchNicknamePEP(r.Context(), broker.conn, bare); err != nil {
+					log.Printf("nickname lookup for %s: %v", bare, err)
+				} else if nick != "" {
+					as.Store["nickname"] = nick
+				}
 				local, _, _ := strings.Cut(bare, "@")
 				as.Username = local
 				as.Store["jid"] = bare
@@ -782,6 +931,12 @@ func main() {
 	}
 
 	jti := newJTILedger(10 * time.Minute)
+	var profileStoreKeys = []string{
+		"nickname",
+		"name", "given_name", "family_name", "middle_name",
+		"picture", "website", "gender", "birthdate",
+		"zoneinfo", "locale", "updated_at", "address", "phone_number",
+	}
 
 	op, err := provider.New(
 		provider.Config{
@@ -792,7 +947,12 @@ func main() {
 		},
 		provider.WithScopes(goidc.ScopeOpenID, goidc.ScopeProfile, goidc.ScopeEmail),
 		provider.WithOpenIDScopeRequired(),
-		provider.WithClaims("preferred_username", "jid", "email", "email_verified"),
+		provider.WithClaims(
+			"preferred_username", "jid",
+			"name", "given_name", "family_name", "middle_name", "nickname",
+			"picture", "website", "birthdate", "zoneinfo", "locale",
+			"email", "email_verified",
+		),
 		provider.WithUserInfoClaims(func(_ context.Context, grant *goidc.Grant) map[string]any {
 			if !hasScope(grant.Scopes, "profile") {
 				return nil
@@ -802,12 +962,22 @@ func main() {
 				"preferred_username": grant.Username,
 				"jid":                grant.Store["jid"],
 			}
-			if emailGateway != "" && hasScope(grant.Scopes, "email") {
-				if addr, err := emailForJID(jid, emailGateway); err == nil {
+			for _, k := range profileStoreKeys {
+				if v, ok := grant.Store[k]; ok && v != nil && v != "" {
+					claims[k] = v
+				}
+			}
+			if hasScope(grant.Scopes, "email") {
+				if emailGateway != "" {
+					if addr, err := emailForJID(jid, emailGateway); err == nil {
+						claims["email"] = addr
+						claims["email_verified"] = true
+					} else {
+						log.Printf("no email claim for %s: %v", jid, err)
+					}
+				} else if addr, _ := grant.Store["email"].(string); addr != "" {
 					claims["email"] = addr
-					claims["email_verified"] = true
-				} else {
-					log.Printf("no email claim for %s: %v", jid, err)
+					claims["email_verified"] = false
 				}
 			}
 			return claims
