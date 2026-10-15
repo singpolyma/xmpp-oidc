@@ -384,6 +384,7 @@ func (b *confirmBroker) onMessage(_ xmpp.Sender, p stanza.Packet) {
 	from := bareJID(msg.From)
 
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	var (
 		key       string
 		pc        pendingConfirmation
@@ -443,7 +444,6 @@ func (b *confirmBroker) onMessage(_ xmpp.Sender, p stanza.Packet) {
 	if found {
 		delete(b.pend, key)
 	}
-	b.mu.Unlock()
 
 	switch {
 	case found:
