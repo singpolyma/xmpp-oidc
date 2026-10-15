@@ -643,9 +643,10 @@ func main() {
 	}
 
 	jwks := goidc.JSONWebKeySet{Keys: []goidc.JSONWebKey{{
-		KeyID:     "proto-1",
+		KeyID:     "oidc1",
 		Key:       key,
 		Algorithm: string(goidc.SigAlgRS256),
+		Use:       string(goidc.KeyUsageSignature),
 	}}}
 
 	broker := newConfirmBroker()
