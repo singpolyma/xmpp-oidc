@@ -448,7 +448,7 @@ func fetchNicknamePEP(ctx context.Context, conn *xmpp.Component, bare string) (s
 
 func fetchVCard4(ctx context.Context, conn *xmpp.Component, bare string) (map[string]any, error) {
 	n, err := fetchPEPItem(ctx, conn, bare, vcard4Node)
-	if err != nil || n == nil || n.XMLName.Local != "vcard" {
+	if err != nil || n == nil || n.XMLName.Local != "vcard" || n.XMLName.Space != vcard4NS {
 		return nil, err
 	}
 	return vcard4Claims(n), nil
