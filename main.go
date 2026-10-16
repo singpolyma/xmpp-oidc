@@ -838,8 +838,7 @@ func main() {
 	var profileStoreKeys = []string{
 		"nickname",
 		"name", "given_name", "family_name", "middle_name",
-		"picture", "website", "gender", "birthdate",
-		"zoneinfo", "locale", "updated_at", "address", "phone_number",
+		"picture", "website", "birthdate", "zoneinfo", "locale",
 	}
 
 	op, err := provider.New(
