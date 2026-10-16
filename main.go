@@ -219,36 +219,61 @@ type confirmationResult struct {
 }
 
 type pendingConfirmation struct {
-	bare  string
-	txn   string
-	reply chan confirmationResult
+	deadline time.Time
+	bare     string
+	txn      string
+	confirm  *confirmationResult
+	vcard    map[string]any
+	nick     *string
 }
 
 type confirmBroker struct {
 	mu   sync.Mutex
-	pend map[string]pendingConfirmation
+	pend map[string]*pendingConfirmation
 	conn *xmpp.Component
 }
 
 func newConfirmBroker() *confirmBroker {
-	return &confirmBroker{pend: make(map[string]pendingConfirmation)}
+	return &confirmBroker{pend: make(map[string]*pendingConfirmation)}
 }
 
-func (b *confirmBroker) Ask(ctx context.Context, jid, txn, method, requestedURL string) (bool, error) {
-	thread := uuid.NewV4().String()
-	pc := pendingConfirmation{bare: bareJID(jid), txn: txn, reply: make(chan confirmationResult, 1)}
+func (b *confirmBroker) Ask(thread, jid, txn, method, requestedURL string) (int, map[string]any, string, error) {
 	b.mu.Lock()
-	if len(b.pend) >= maxPending {
-		b.mu.Unlock()
-		return false, fmt.Errorf("busy, try again")
+	defer b.mu.Unlock()
+	pc := b.pend[thread]
+
+	// Already asked, check status
+	if pc != nil {
+		if pc.confirm != nil && pc.vcard != nil && pc.nick != nil {
+			delete(b.pend, thread)
+			if pc.confirm.err != "" {
+				return 0, nil, "", errors.New(pc.confirm.err)
+			}
+			if pc.confirm.approved {
+				return 1, pc.vcard, *pc.nick, nil
+			}
+			return 0, nil, "", nil
+		} else if time.Now().After(pc.deadline) {
+			delete(b.pend, thread)
+			return 0, nil, "", fmt.Errorf("no answer within %v", confirmWait)
+		} else {
+			return -1, nil, "", nil // Still waiting
+		}
 	}
+
+	now := time.Now()
+	for key, pc := range b.pend {
+		// If we're twice past the timeout, remove any data
+		if now.After(pc.deadline.Add(confirmWait)) {
+			delete(b.pend, key)
+		}
+	}
+
+	if len(b.pend) >= maxPending {
+		return 0, nil, "", fmt.Errorf("busy, try again")
+	}
+	pc = &pendingConfirmation{bare: bareJID(jid), txn: txn, deadline: time.Now().Add(confirmWait)}
 	b.pend[thread] = pc
-	b.mu.Unlock()
-	defer func() {
-		b.mu.Lock()
-		delete(b.pend, thread)
-		b.mu.Unlock()
-	}()
 
 	body := fmt.Sprintf("A web login is being requested for %s.\n%s\nTransaction identifier: %s\n"+
 		"If this was you, reply with \"OK\" to confirm (or \"No\" to cancel).",
@@ -268,32 +293,33 @@ func (b *confirmBroker) Ask(ctx context.Context, jid, txn, method, requestedURL 
 	}
 
 	if err := b.conn.Send(msg); err != nil {
-		return false, fmt.Errorf("component not connected or send failed: %w", err)
+		return 0, nil, "", fmt.Errorf("component not connected or send failed: %w", err)
 	}
 	log.Printf("login requested: jid=%s txn=%s", jid, txn)
 
-	timer := time.NewTimer(confirmWait)
-	defer func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
+	go func() {
+		vc, err := fetchVCard4(context.Background(), b.conn, jid)
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if err != nil {
+			pc.vcard = make(map[string]any)
+			log.Printf("vcard4 lookup for %s: %v", jid, err)
+		} else {
+			pc.vcard = vc
 		}
 	}()
 
-	select {
-	case res := <-pc.reply:
-		if res.err != "" {
-			return false, errors.New(res.err)
+	go func() {
+		nick, err := fetchNicknamePEP(context.Background(), b.conn, jid)
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		pc.nick = &nick
+		if err != nil {
+			log.Printf("nickname lookup for %s: %v", jid, err)
 		}
-		return res.approved, nil
-	case <-ctx.Done(): // browser tab went away
-		return false, ctx.Err()
-	case <-timer.C:
-		return false, fmt.Errorf("no answer within %v", confirmWait)
-	}
+	}()
 
+	return -1, nil, "", nil
 }
 
 func (b *confirmBroker) onMessage(_ xmpp.Sender, p stanza.Packet) {
@@ -307,7 +333,7 @@ func (b *confirmBroker) onMessage(_ xmpp.Sender, p stanza.Packet) {
 	defer b.mu.Unlock()
 	var (
 		key       string
-		pc        pendingConfirmation
+		pc        *pendingConfirmation
 		res       confirmationResult
 		found     bool
 		ambiguous bool
@@ -361,16 +387,10 @@ func (b *confirmBroker) onMessage(_ xmpp.Sender, p stanza.Packet) {
 			res = confirmationResult{approved, ""}
 		}
 	}
-	if found {
-		delete(b.pend, key)
-	}
 
 	switch {
 	case found:
-		select {
-		case pc.reply <- res:
-		default:
-		}
+		pc.confirm = &res
 		log.Printf("login answer: jid=%s txn=%s approved=%v", msg.From, pc.txn, res.approved)
 	case ambiguous:
 		body := "Several logins are pending. Repeat your answer with the transaction " +
@@ -652,62 +672,68 @@ func hasScope(scopes, want string) bool {
 	return false
 }
 
+const pollPage = `<!DOCTYPE html>
+<html><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="refresh" content="1" />
+<title>Sign in with Jabber ID</title>
+<link rel="stylesheet" href="/static/simple.css" />
+</head><body>
+<h1>Sign in with Jabber ID</h1>
+<p class="notice">Please check your app for a prompt with the transaction ID
+<strong>%[1]s</strong>.</p>
+<small>If this page does not reload after you have approved the login using
+your app, you can reload it manually.</small>
+</body></html>`
+
 func xmpp70AuthnPolicy(broker *confirmBroker) goidc.AuthnPolicy {
 	return goidc.NewPolicy("xep-0070",
 		func(*http.Request, *goidc.AuthnSession, *goidc.Client) bool { return true },
 		func(w http.ResponseWriter, r *http.Request, as *goidc.AuthnSession, client *goidc.Client) (goidc.Status, error) {
 			redir := redirectForDisplay(as, client)
 			profileRequested := hasScope(as.Scopes, "profile") || hasScope(as.Scopes, "email")
+			if as.Store == nil {
+				as.Store = map[string]any{}
+			}
 			jid, txn, have := parseCredentials(r)
-			if !have {
-				writeLoginPage(w, as.ID, redir, "", profileRequested)
-				return goidc.StatusPending, nil
+			if have {
+				as.Store["jid"] = jid
+				as.Store["txn"] = txn
+				as.Store["shareProfile"] = profileRequested && r.PostFormValue("share_profile") != ""
+			} else {
+				jid, _ = as.Store["jid"].(string)
+				txn, _ = as.Store["txn"].(string)
+				if jid == "" || txn == "" {
+					writeLoginPage(w, as.ID, redir, "", profileRequested)
+					return goidc.StatusPending, nil
+				}
 			}
 			bare, full, err := normalizeJID(jid)
 			if err != nil {
 				writeLoginPage(w, as.ID, redir, "That Jabber ID isn't valid", profileRequested)
 				return goidc.StatusPending, nil
 			}
-			shareProfile := profileRequested && r.PostFormValue("share_profile") != ""
-			var vc map[string]any
-			var nick string
-			var wg sync.WaitGroup
-			if shareProfile {
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
-					var err error
-					if vc, err = fetchVCard4(r.Context(), broker.conn, bare); err != nil {
-						log.Printf("vcard4 lookup for %s: %v", bare, err)
-					}
-				}()
-				go func() {
-					defer wg.Done()
-					var err error
-					if nick, err = fetchNicknamePEP(r.Context(), broker.conn, bare); err != nil {
-						log.Printf("nickname lookup for %s: %v", bare, err)
-					}
-				}()
-			}
-			app, err := broker.Ask(r.Context(), full, txn, "GET", redir)
+			shareProfile := as.Store["shareProfile"].(bool)
+			app, vcard, nick, err := broker.Ask(as.ID, bare, txn, "GET", redir)
 			switch {
 			case err != nil:
 				writeLoginPage(w, as.ID, redir, err.Error(), profileRequested)
 				return goidc.StatusPending, nil
-			case !app:
+			case app == 0:
 				writeLoginPage(w, as.ID, redir, "Request was denied", profileRequested)
+				return goidc.StatusPending, nil
+			case app == -1:
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				fmt.Fprintf(w, pollPage, txn)
 				return goidc.StatusPending, nil
 			}
 			sub := hmac.New(func() hash.Hash { return sha3.New256() }, []byte(os.Getenv("SALT")+as.ClientID))
 			sub.Write([]byte(bare))
 			as.Subject = hex.EncodeToString(sub.Sum(nil))
-			if as.Store == nil {
-				as.Store = map[string]any{}
-			}
 			if shareProfile {
-				wg.Wait()
 				as.GrantedScopes = as.Scopes
-				for k, val := range vc {
+				for k, val := range vcard {
 					as.Store[k] = val
 				}
 				if nick != "" {
@@ -715,7 +741,6 @@ func xmpp70AuthnPolicy(broker *confirmBroker) goidc.AuthnPolicy {
 				}
 				local, _, _ := strings.Cut(bare, "@")
 				as.Username = local
-				as.Store["jid"] = bare
 			} else {
 				as.GrantedScopes = "openid"
 			}
@@ -944,7 +969,7 @@ func main() {
 			}
 			return claims
 		}),
-		provider.WithAuthSessionLifetime(180),
+		provider.WithAuthSessionLifetime(300),
 		provider.WithNoneAuthn(), // public clients only. PKCE required
 		provider.WithDCR(
 			dcrDB,
