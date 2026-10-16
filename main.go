@@ -489,7 +489,11 @@ func parsePlainAnswer(body string) (approved bool, txn string, understood bool) 
 	default:
 		return false, "", false
 	}
-	return approved, fields[1], true
+	txnid := ""
+	if len(fields) > 1 {
+		txnid = fields[1]
+	}
+	return approved, txnid, true
 }
 
 func fetchPEPItem(ctx context.Context, conn *xmpp.Component, bare, node string) (*stanza.Node, error) {
