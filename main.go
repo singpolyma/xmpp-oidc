@@ -434,6 +434,12 @@ func fetchPEPItem(ctx context.Context, conn *xmpp.Component, bare, node string) 
 		}
 		return ps.Items.List[0].Any, nil
 	case <-ctx.Done():
+		go func() {
+			select {
+			case <-ch:
+			case <-time.After(time.Minute):
+			}
+		}()
 		return nil, ctx.Err()
 	}
 }
