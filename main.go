@@ -482,15 +482,6 @@ func vcard4Claims(v *stanza.Node) map[string]any {
 	return claims
 }
 
-func parseVCardTimestamp(s string) (int64, bool) {
-	for _, layout := range []string{"20060102T150405Z0700", "20060102T150405", time.RFC3339} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.Unix(), true
-		}
-	}
-	return 0, false
-}
-
 func nodeChild(n *stanza.Node, local string) *stanza.Node {
 	if n == nil {
 		return nil
