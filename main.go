@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -795,6 +796,38 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
+func listenOn(addr string) (net.Listener, error) {
+	path, isUnix := strings.CutPrefix(addr, "unix:")
+	log.Printf("%s %s", path, isUnix)
+	if !isUnix {
+		return net.Listen("tcp", addr)
+	}
+
+	if fi, err := os.Stat(path); err == nil {
+		if fi.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("%s exists and is not a socket", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("remove stale socket %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(path, "@") {
+		return ln, nil
+	}
+	if err := os.Chmod(path, 0o660); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("chmod %s: %w", path, err)
+	}
+	return ln, nil
+}
+
 func main() {
 	iss := envOr("ISSUER", "http://localhost:8080")
 	listen := envOr("LISTEN", ":8080")
@@ -942,13 +975,18 @@ func main() {
 
 	op.RegisterRoutes(mux)
 
+	ln, err := listenOn(listen)
+	if err != nil {
+		log.Fatalf("listen on %s: %v", listen, err)
+	}
 	srv := &http.Server{
-		Addr:        listen,
 		Handler:     withCORS(mux),
 		ReadTimeout: 5 * time.Second,
 	}
-	log.Printf("OIDC endpoints + static assets on %s", listen)
-	log.Fatal(srv.ListenAndServe())
+	log.Printf("OIDC endpoints + static assets on %s", ln.Addr())
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
 }
 
 func envOr(k, def string) string {
