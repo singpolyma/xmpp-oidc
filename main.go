@@ -17,7 +17,6 @@ import (
 	"io/fs"
 	"log"
 	"math/big"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -107,96 +106,6 @@ func dcrPolicy(_ context.Context, id string, meta *goidc.ClientMeta) error {
 		meta.Name = meta.Name[:100]
 	}
 	return nil
-}
-
-// trustedNet: peers we believe in X-Forwarded-For
-var trustedNet = parseCIDRList(envOr("TRUSTED_PROXIES", "127.0.0.0/8,::1/128"))
-
-func parseCIDRList(s string) []*net.IPNet {
-	var out []*net.IPNet
-	for _, part := range strings.Split(s, ",") {
-		if _, n, err := net.ParseCIDR(strings.TrimSpace(part)); err == nil {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
-func isTrusted(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	for _, n := range trustedNet {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-func clientIP(r *http.Request) string {
-	peer := peerHost(r.RemoteAddr)
-	if isTrusted(net.ParseIP(peer)) == false {
-		return peer
-	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			trimmed := strings.TrimSpace(parts[i])
-			if ip := net.ParseIP(trimmed); ip != nil {
-				if isTrusted(ip) {
-					continue
-				}
-				return ip.String()
-			}
-			return trimmed
-		}
-	}
-	return peer
-}
-
-func peerHost(remote string) string {
-	host, _, err := net.SplitHostPort(remote)
-	if err != nil {
-		return remote
-	}
-	return host
-}
-
-func registerRateLimiter(next http.Handler) http.Handler {
-	var (
-		mu   sync.Mutex
-		last = map[string]time.Time{}
-	)
-	go func() {
-		t := time.NewTicker(time.Minute)
-		for range t.C {
-			mu.Lock()
-			cutoff := time.Now().Add(-time.Minute)
-			for ip, t := range last {
-				if t.Before(cutoff) {
-					delete(last, ip)
-				}
-			}
-			mu.Unlock()
-		}
-	}()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/register" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		ip := clientIP(r)
-		mu.Lock()
-		if t, ok := last[ip]; ok && time.Since(t) < 30*time.Second {
-			mu.Unlock()
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
-			return
-		}
-		last[ip] = time.Now()
-		mu.Unlock()
-		next.ServeHTTP(w, r)
-	})
 }
 
 func validateRedirectURI(raw string) error {
@@ -1021,7 +930,7 @@ func main() {
 	}
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServerFS(staticSub)))
 
-	op.RegisterRoutes(mux, registerRateLimiter)
+	op.RegisterRoutes(mux)
 
 	srv := &http.Server{
 		Addr:        listen,
