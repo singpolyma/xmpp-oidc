@@ -35,6 +35,7 @@ and an empty SQLite database at `DB` (default `xmpp-oidc.sqlite`) for client reg
 | `SALT`                  | (**required**)         | Random salt value |
 | `DB`                    | `xmpp-oidc.sqlite`     | DB for registered clients |
 | `TRUSTED_PROXIES`       | `127.0.0.0/8,::1/128`  | Comma-separated CIDRs whose `X-Forwarded-For` is trusted when picking the client IP for the `/register` rate limit. |
+| `EMAIL_GATEWAY`         | None                   | Email gateway domain to use for making email addresses from Jabber IDs |
 
 ## Registering a client (for testing)
 
