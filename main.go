@@ -213,7 +213,10 @@ func (l *jtiLedger) sweep() {
 	}
 }
 
-type confirmationResult struct{ approved bool }
+type confirmationResult struct {
+	approved bool
+	err      string
+}
 
 type pendingConfirmation struct {
 	bare  string
@@ -281,6 +284,9 @@ func (b *confirmBroker) Ask(ctx context.Context, jid, txn, method, requestedURL 
 
 	select {
 	case res := <-pc.reply:
+		if res.err != "" {
+			return false, errors.New(res.err)
+		}
 		return res.approved, nil
 	case <-ctx.Done(): // browser tab went away
 		return false, ctx.Err()
@@ -315,7 +321,7 @@ func (b *confirmBroker) onMessage(_ xmpp.Sender, p stanza.Packet) {
 			if res, ok = structuredAnswer(msg, cand.txn); ok {
 				// typed XEP-0070 reply
 			} else if approved, _, ok := parsePlainAnswer(msg.Body); ok {
-				res = confirmationResult{approved}
+				res = confirmationResult{approved, ""}
 			} else {
 				found = false
 			}
@@ -352,7 +358,7 @@ func (b *confirmBroker) onMessage(_ xmpp.Sender, p stanza.Packet) {
 		}
 		if key != "" {
 			pc, found = b.pend[key], true
-			res = confirmationResult{approved}
+			res = confirmationResult{approved, ""}
 		}
 	}
 	if found {
@@ -381,7 +387,7 @@ func (b *confirmBroker) onMessage(_ xmpp.Sender, p stanza.Packet) {
 func structuredAnswer(msg stanza.Message, txn string) (confirmationResult, bool) {
 	for _, ext := range msg.Extensions {
 		if c, ok := ext.(*confirm); ok && c.ID == txn {
-			return confirmationResult{approved: msg.Type != "error"}, true
+			return confirmationResult{approved: msg.Type != "error", err: msg.Error.Text}, true
 		}
 	}
 	return confirmationResult{}, false
