@@ -387,11 +387,11 @@ func structuredAnswer(msg stanza.Message, txn string) (confirmationResult, bool)
 }
 
 func parsePlainAnswer(body string) (approved bool, txn string, understood bool) {
-	fields := strings.Fields(strings.ToLower(strings.TrimSpace(body)))
+	fields := strings.Fields(strings.TrimSpace(body))
 	if len(fields) == 0 || len(fields) > 2 {
 		return false, "", false
 	}
-	switch fields[0] {
+	switch strings.ToLower(fields[0]) {
 	case "ok", "yes":
 		approved = true
 	case "no":
