@@ -867,20 +867,18 @@ func main() {
 			"email", "email_verified",
 		),
 		provider.WithUserInfoClaims(func(_ context.Context, grant *goidc.Grant) map[string]any {
-			if !hasScope(grant.Scopes, "profile") {
-				return nil
-			}
-			jid, _ := grant.Store["jid"].(string)
-			claims := map[string]any{
-				"preferred_username": grant.Username,
-				"jid":                grant.Store["jid"],
-			}
-			for _, k := range profileStoreKeys {
-				if v, ok := grant.Store[k]; ok && v != nil && v != "" {
-					claims[k] = v
+			claims := map[string]any{}
+			if hasScope(grant.Scopes, "profile") {
+				claims["preferred_username"] = grant.Username
+				claims["jid"] = grant.Store["jid"]
+				for _, k := range profileStoreKeys {
+					if v, ok := grant.Store[k]; ok && v != nil && v != "" {
+						claims[k] = v
+					}
 				}
 			}
 			if hasScope(grant.Scopes, "email") {
+				jid, _ := grant.Store["jid"].(string)
 				if emailGateway != "" {
 					if addr, err := emailForJID(jid, emailGateway); err == nil {
 						claims["email"] = addr
