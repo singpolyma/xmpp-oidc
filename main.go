@@ -655,6 +655,27 @@ func xmpp70AuthnPolicy(broker *confirmBroker) goidc.AuthnPolicy {
 				writeLoginPage(w, as.ID, redir, "That Jabber ID isn't valid", profileRequested)
 				return goidc.StatusPending, nil
 			}
+			shareProfile := profileRequested && r.PostFormValue("share_profile") != ""
+			var vc map[string]any
+			var nick string
+			var wg sync.WaitGroup
+			if shareProfile {
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					var err error
+					if vc, err = fetchVCard4(r.Context(), broker.conn, bare); err != nil {
+						log.Printf("vcard4 lookup for %s: %v", bare, err)
+					}
+				}()
+				go func() {
+					defer wg.Done()
+					var err error
+					if nick, err = fetchNicknamePEP(r.Context(), broker.conn, bare); err != nil {
+						log.Printf("nickname lookup for %s: %v", bare, err)
+					}
+				}()
+			}
 			app, err := broker.Ask(r.Context(), full, txn, "GET", redir)
 			switch {
 			case err != nil:
@@ -670,18 +691,13 @@ func xmpp70AuthnPolicy(broker *confirmBroker) goidc.AuthnPolicy {
 			if as.Store == nil {
 				as.Store = map[string]any{}
 			}
-			if profileRequested && r.PostFormValue("share_profile") != "" {
+			if shareProfile {
+				wg.Wait()
 				as.GrantedScopes = as.Scopes
-				if vc, err := fetchVCard4(r.Context(), broker.conn, bare); err != nil {
-					log.Printf("vcard4 lookup for %s: %v", bare, err)
-				} else {
-					for k, val := range vc {
-						as.Store[k] = val
-					}
+				for k, val := range vc {
+					as.Store[k] = val
 				}
-				if nick, err := fetchNicknamePEP(r.Context(), broker.conn, bare); err != nil {
-					log.Printf("nickname lookup for %s: %v", bare, err)
-				} else if nick != "" {
+				if nick != "" {
 					as.Store["nickname"] = nick
 				}
 				local, _, _ := strings.Cut(bare, "@")
