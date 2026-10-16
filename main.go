@@ -821,7 +821,7 @@ func listenOn(addr string) (net.Listener, error) {
 	if strings.HasPrefix(path, "@") {
 		return ln, nil
 	}
-	if err := os.Chmod(path, 0o660); err != nil {
+	if err := os.Chmod(path, 0o666); err != nil {
 		ln.Close()
 		return nil, fmt.Errorf("chmod %s: %w", path, err)
 	}
