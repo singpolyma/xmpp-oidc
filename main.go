@@ -650,7 +650,7 @@ func xmpp70AuthnPolicy(broker *confirmBroker) goidc.AuthnPolicy {
 		func(*http.Request, *goidc.AuthnSession, *goidc.Client) bool { return true },
 		func(w http.ResponseWriter, r *http.Request, as *goidc.AuthnSession, client *goidc.Client) (goidc.Status, error) {
 			redir := redirectForDisplay(as, client)
-			profileRequested := hasScope(as.Scopes, "profile")
+			profileRequested := hasScope(as.Scopes, "profile") || hasScope(as.Scopes, "email")
 			jid, txn, have := parseCredentials(r)
 			if !have {
 				writeLoginPage(w, as.ID, redir, "", profileRequested)
