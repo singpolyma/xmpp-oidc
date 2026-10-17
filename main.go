@@ -831,7 +831,6 @@ func withCORS(next http.Handler) http.Handler {
 
 func listenOn(addr string) (net.Listener, error) {
 	path, isUnix := strings.CutPrefix(addr, "unix:")
-	log.Printf("%s %s", path, isUnix)
 	if !isUnix {
 		return net.Listen("tcp", addr)
 	}
