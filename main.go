@@ -302,10 +302,12 @@ func (b *confirmBroker) Ask(thread, jid, txn, method, requestedURL string) (int,
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		if err != nil {
-			pc.vcard = make(map[string]any)
 			log.Printf("vcard4 lookup for %s: %v", jid, err)
 		} else {
 			pc.vcard = vc
+		}
+		if pc.vcard == nil {
+			pc.vcard = map[string]any{}
 		}
 	}()
 
